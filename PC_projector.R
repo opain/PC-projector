@@ -21,7 +21,9 @@ make_option("--extract", action="store", default='NA', type='character',
 make_option("--memory", action="store", default=5000, type='numeric',
 		help="Memory limit [optional]"),
 make_option("--pop_data", action="store", default=NA, type='character',
-		help="Population data on reference individuals [optional]")
+		help="Population data on reference individuals [optional]"),
+make_option("--n_core", action="store", default=1, type='numeric',
+		help="Number of cores for parallel computing [optional]")
 )
 
 opt = parse_args(OptionParser(option_list=option_list))
@@ -30,6 +32,9 @@ library(data.table)
 library(caret)
 library(ggplot2)
 library(cowplot)
+library(foreach)
+library(doMC)
+registerDoMC(opt$n_core)
 
 tmp<-sub('.*/','',opt$output)
 opt$output_dir<-sub(paste0(tmp,'*.'),'',opt$output)
@@ -57,8 +62,8 @@ if(!is.na(opt$extract)){
 	sink(file = paste(opt$output,'.log',sep=''), append = T)
 	cat(paste0('Extracting SNPs in ',opt$extract,'...'))
 	sink()
-	for(i in 1:22){
-		system(paste0(opt$plink,' --bfile ',opt$ref_plink_chr,i,' --make-bed --extract ',opt$extract,' --out ',opt$output_dir,'ref.chr',i,' --memory ',floor(opt$memory/0.5)))
+	foreach(i=1:22, .combine=c) %dopar% {
+		system(paste0(opt$plink,' --bfile ',opt$ref_plink_chr,i,' --make-bed --extract ',opt$extract,' --out ',opt$output_dir,'ref.chr',i,' --memory ',floor((opt$memory*0.7)/opt$n_core)))
 	}
 	sink(file = paste(opt$output,'.log',sep=''), append = T)
 	cat('Done!\n')
@@ -106,7 +111,7 @@ ref_ID_update<-data.frame(OLD_FID=ref_fam$V1,
                           
 write.table(ref_ID_update, paste0(opt$output_dir,'ref_id_update.txt'), row.names=F, col.names=F, quote=F)
 
-system(paste0(opt$plink,' --merge-list ',opt$output_dir,'ref_mergelist.txt --make-bed --update-ids ',opt$output_dir,'ref_id_update.txt --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory/0.5)))
+system(paste0(opt$plink,' --merge-list ',opt$output_dir,'ref_mergelist.txt --make-bed --update-ids ',opt$output_dir,'ref_id_update.txt --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory*0.7)))
 
 sink(file = paste(opt$output,'.log',sep=''), append = T)
 cat('Done!\n')
@@ -153,7 +158,7 @@ long_ld_exclude<-ref_bim$V2[ (ref_bim$V1 == 1 & ref_bim$V4 >= 48e6 & ref_bim$V4 
 write.table(long_ld_exclude, paste0(opt$output_dir,'long_ld.exclude'), col.names=F, row.names=F, quote=F)
   
 # Identify LD independent SNPs.
-system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --exclude ',opt$output_dir,'long_ld.exclude --indep-pairwise 1000 5 0.2 --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory/0.5)))
+system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --exclude ',opt$output_dir,'long_ld.exclude --indep-pairwise 1000 5 0.2 --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory*0.7)))
 
 sink(file = paste(opt$output,'.log',sep=''), append = T)
 cat('Done!\n')
@@ -164,17 +169,17 @@ sink()
 ###
 # This ensures the PCs are not dependent on the target sample.
 
-system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --freqx --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory/0.5)))
+system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --freqx --out ',opt$output_dir,'ref_merge --memory ',floor(opt$memory*0.7)))
 
 ###
 # Calculate PCs in the reference sample for scaling the target sample factor scores.
 ###
 
 # Extract LD independent SNPs
-system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --extract ',opt$output_dir,'ref_merge.prune.in --make-bed --out ',opt$output_dir,'ref_merge_pruned --memory ',floor(opt$memory/0.5)))
+system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge --extract ',opt$output_dir,'ref_merge.prune.in --make-bed --out ',opt$output_dir,'ref_merge_pruned --memory ',floor(opt$memory*0.7)))
 
 # Calculate PCs
-system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge_pruned --read-freq ',opt$output_dir,'ref_merge.frqx --pca ',opt$n_pcs,' --out ',opt$output_dir,'ref_merge_pruned --memory ',floor(opt$memory/0.5)))
+system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_merge_pruned --read-freq ',opt$output_dir,'ref_merge.frqx --pca ',opt$n_pcs,' --out ',opt$output_dir,'ref_merge_pruned --memory ',floor(opt$memory*0.7)))
 
 # Read in reference PC scores and calculate the mean and SD
 PCs_ref<-data.frame(fread(paste0(opt$output_dir,'ref_merge_pruned.eigenvec')))
@@ -187,7 +192,7 @@ PCs_ref_centre_scale<-data.frame(PC=names(PCs_ref[-1:-2]),
 PCs_ref_scale<-PCs_ref
 for(i in names(PCs_ref)[-1:-2]){
 PCs_ref_scale[i]<-PCs_ref[i]-PCs_ref_centre_scale$Mean[PCs_ref_centre_scale$PC == i]
-PCs_ref_scale[i]<-PCs_ref[i]/PCs_ref_centre_scale$SD[PCs_ref_centre_scale$PC == i]
+PCs_ref_scale[i]<-PCs_ref_scale[i]/PCs_ref_centre_scale$SD[PCs_ref_centre_scale$PC == i]
 }
 
 PCs_ref_scale$FID<-sub('REF_','',PCs_ref_scale$FID)
@@ -210,7 +215,7 @@ sink()
 # Create an object to store all PCs for target sample
 PCs_targ<-NULL
 
-for(batch in 1:length(batches)){
+PCs_targ<-foreach(batch=1:length(batches), .combine=rbind) %dopar% {
 
   ###
   # Extract batch from the target data, update IDs to be clearly distinguishable, and merge per chromosome files
@@ -225,12 +230,12 @@ for(batch in 1:length(batches)){
   write.table(targ_fam_batch_ID_update, paste0(opt$output_dir,'targ_batch',batch,'_id_update.txt'), row.names=F, col.names=F, quote=F)
   
 	if(!is.na(opt$extract)){
-	  for(chr in 1:22){
-		system(paste0(opt$plink,' --bfile ',opt$target_plink_chr,chr,' --make-bed --extract ',opt$extract,' --keep ',opt$output_dir,'targ_batch',batch,'_keep.txt --update-ids ',opt$output_dir,'targ_batch',batch,'_id_update.txt --out ',opt$output_dir,'targ_batch',batch,'_chr',chr,' --memory ',floor(opt$memory/0.5)))
+		for(chr in 1:22) {
+			system(paste0(opt$plink,' --bfile ',opt$target_plink_chr,chr,' --make-bed --extract ',opt$extract,' --keep ',opt$output_dir,'targ_batch',batch,'_keep.txt --update-ids ',opt$output_dir,'targ_batch',batch,'_id_update.txt --out ',opt$output_dir,'targ_batch',batch,'_chr',chr,' --memory ',floor((opt$memory*0.7)/opt$n_core)))
 	  }
 	} else{
- 	  for(chr in 1:22){
-		system(paste0(opt$plink,' --bfile ',opt$target_plink_chr,chr,' --make-bed --keep ',opt$output_dir,'targ_batch',batch,'_keep.txt --update-ids ',opt$output_dir,'targ_batch',batch,'_id_update.txt --out ',opt$output_dir,'targ_batch',batch,'_chr',chr,' --memory ',floor(opt$memory/0.5)))
+		for(chr in 1:22) {
+			system(paste0(opt$plink,' --bfile ',opt$target_plink_chr,chr,' --make-bed --keep ',opt$output_dir,'targ_batch',batch,'_keep.txt --update-ids ',opt$output_dir,'targ_batch',batch,'_id_update.txt --out ',opt$output_dir,'targ_batch',batch,'_chr',chr,' --memory ',floor((opt$memory*0.7)/opt$n_core)))
 	  }
 	}
 	
@@ -253,17 +258,17 @@ for(batch in 1:length(batches)){
 			write.table(bim, paste0(opt$output_dir,'targ_batch',batch,'_chr',i,'.bim'), col.names=F, row.names=F, quote=F)
 	}
 
-  system(paste0(opt$plink,' --merge-list ',opt$output_dir,'targ_batch',batch,'_mergelist.txt --out ',opt$output_dir,'targ_batch',batch,'_merge --memory ',floor(opt$memory/0.5)))
+  system(paste0(opt$plink,' --merge-list ',opt$output_dir,'targ_batch',batch,'_mergelist.txt --out ',opt$output_dir,'targ_batch',batch,'_merge --memory ',floor((opt$memory*0.7)/opt$n_core)))
 
   ###
   # Merge the target_batch and ref data
   ###
 
-  log<-system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --bmerge ',opt$output_dir,'ref_merge --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge --memory ',floor(opt$memory/0.5)))
+  log<-system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --bmerge ',opt$output_dir,'ref_merge --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge --memory ',floor((opt$memory*0.7)/opt$n_core)))
 
 	if(log ==3){  
-  		system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --exclude ',opt$output_dir,'ref_targ_batch1_merge-merge.missnp --make-bed --out ',opt$output_dir,'targ_batch',batch,'_merge --memory ',floor(opt$memory/0.5)))
-		log<-system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --bmerge ',opt$output_dir,'ref_merge --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge --memory ',floor(opt$memory/0.5)))
+  		system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --exclude ',opt$output_dir,'ref_targ_batch1_merge-merge.missnp --make-bed --out ',opt$output_dir,'targ_batch',batch,'_merge --memory ',floor((opt$memory*0.7)/opt$n_core)))
+		log<-system(paste0(opt$plink,' --bfile ',opt$output_dir,'targ_batch',batch,'_merge --bmerge ',opt$output_dir,'ref_merge --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge --memory ',floor((opt$memory*0.7)/opt$n_core)))
 	}
   
   # Delete per chromosome target data
@@ -273,7 +278,7 @@ for(batch in 1:length(batches)){
   # Extract SNPs identified as LD independent.
   ###
 
-  system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_targ_batch',batch,'_merge --extract ',opt$output_dir,'ref_merge.prune.in --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --memory ',floor(opt$memory/0.5)))
+  system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_targ_batch',batch,'_merge --extract ',opt$output_dir,'ref_merge.prune.in --make-bed --out ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --memory ',floor((opt$memory*0.7)/opt$n_core)))
   
   ###
   # Perform PCA using reference individuals only
@@ -286,7 +291,7 @@ for(batch in 1:length(batches)){
   targ_fam_batch_clust$Cluster[grepl('REF_',targ_fam_batch_clust$V1)]<-'REF'
   write.table(targ_fam_batch_clust, paste0(opt$output_dir,'ref_targ_batch',batch,'_merge_pruned.clusters'), col.names=F, row.names=F, quote=F)
   
-  system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --read-freq ',opt$output_dir,'ref_merge.frqx --pca ',opt$n_pcs,' --pca-cluster-names REF --within ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned.clusters --out ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --memory ',floor(opt$memory/0.5)))
+  system(paste0(opt$plink,' --bfile ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --read-freq ',opt$output_dir,'ref_merge.frqx --pca ',opt$n_pcs,' --pca-cluster-names REF --within ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned.clusters --out ',opt$output_dir,'ref_targ_batch',batch,'_merge_pruned --memory ',floor((opt$memory*0.7)/opt$n_core)))
 
   ###
   # Read in the PCs to be scaled to the reference and combined with the other batches.
@@ -300,14 +305,12 @@ for(batch in 1:length(batches)){
   PCs_targ_batch_scale<-PCs_targ_batch
   for(i in names(PCs_targ_batch)[-1:-2]){
 	PCs_targ_batch_scale[i]<-PCs_targ_batch[i]-PCs_ref_centre_scale$Mean[PCs_ref_centre_scale$PC == i]
-	PCs_targ_batch_scale[i]<-PCs_targ_batch[i]/PCs_ref_centre_scale$SD[PCs_ref_centre_scale$PC == i]
+	PCs_targ_batch_scale[i]<-PCs_targ_batch_scale[i]/PCs_ref_centre_scale$SD[PCs_ref_centre_scale$PC == i]
   }
 
   # Convert the IDs back to match the target data
   PCs_targ_batch_scale$FID<-sub('TARG_','',PCs_targ_batch_scale$FID)
   PCs_targ_batch_scale$IID<-sub('TARG_','',PCs_targ_batch_scale$IID)
-
-	PCs_targ<-rbind(PCs_targ,PCs_targ_batch_scale)
 
   ###
   # Delete files that are not required for the next batch
@@ -319,6 +322,7 @@ for(batch in 1:length(batches)){
   cat('Batch',batch,'complete.\n')
   sink()
 
+  PCs_targ_batch_scale
 }
 
 write.table(PCs_targ, paste0(opt$output,'.eigenvec'), col.names=T, row.names=F, quote=F)
@@ -372,7 +376,7 @@ if(!is.na(opt$pop_data)){
 
 	Label_groups<-names(ref_PCs_targ_PCs[!grepl('PC|IID',names(ref_PCs_targ_PCs))])
 
-	for(i in Label_groups){
+	foreach(i=Label_groups, .combine=c) %dopar% {
 		PC_1_2<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target',], aes(x=PC1,y=PC2, colour=get(i))) + 
 		  geom_point() + 
 			geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC1,y=PC2), size=3, colour='black') + 
@@ -403,6 +407,58 @@ if(!is.na(opt$pop_data)){
 		print(plot_grid(PC_1_2,PC_3_4,PC_5_6,PC_7_8,PC_9_10))
 		dev.off()
 
+		# Create subset of individuals that are within a certain range of the target individuals
+		PC_1_2_zoom<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target' & 
+							ref_PCs_targ_PCs$PC1 > (min(ref_PCs_targ_PCs$PC1[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC1 < (max(ref_PCs_targ_PCs$PC1[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5) &
+							ref_PCs_targ_PCs$PC2 > (min(ref_PCs_targ_PCs$PC2[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC2 < (max(ref_PCs_targ_PCs$PC2[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5),], aes(x=PC1,y=PC2, colour=get(i))) + 
+		  geom_point() + 
+		  geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC1,y=PC2), size=3, colour='black') + 
+		  ggtitle("PCs 1 and 2") +
+		  labs(colour="")
+		PC_3_4_zoom<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target' & 
+							ref_PCs_targ_PCs$PC3 > (min(ref_PCs_targ_PCs$PC3[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC3 < (max(ref_PCs_targ_PCs$PC3[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5) &
+							ref_PCs_targ_PCs$PC4 > (min(ref_PCs_targ_PCs$PC4[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC4 < (max(ref_PCs_targ_PCs$PC4[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5),], aes(x=PC3,y=PC4, colour=get(i))) + 
+		  geom_point() + 
+		  geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC3,y=PC4), size=3, colour='black') + 
+		  ggtitle("PCs 3 and 4") +
+		  labs(colour="")
+		PC_5_6_zoom<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target' & 
+							ref_PCs_targ_PCs$PC5 > (min(ref_PCs_targ_PCs$PC5[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC5 < (max(ref_PCs_targ_PCs$PC5[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5) &
+							ref_PCs_targ_PCs$PC6 > (min(ref_PCs_targ_PCs$PC6[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC6 < (max(ref_PCs_targ_PCs$PC6[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5),], aes(x=PC5,y=PC6, colour=get(i))) + 
+		  geom_point() + 
+		  geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC5,y=PC6), size=3, colour='black') + 
+		  ggtitle("PCs 5 and 6") +
+		  labs(colour="")
+		PC_7_8_zoom<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target' & 
+							ref_PCs_targ_PCs$PC7 > (min(ref_PCs_targ_PCs$PC7[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC7 < (max(ref_PCs_targ_PCs$PC7[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5) &
+							ref_PCs_targ_PCs$PC8 > (min(ref_PCs_targ_PCs$PC8[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC8 < (max(ref_PCs_targ_PCs$PC8[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5),], aes(x=PC7,y=PC8, colour=get(i))) + 
+		  geom_point() + 
+		  geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC7,y=PC8), size=3, colour='black') + 
+		  ggtitle("PCs 7 and 8") +
+		  labs(colour="")
+		PC_9_10_zoom<-ggplot(ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] != 'Target' & 
+							ref_PCs_targ_PCs$PC9 > (min(ref_PCs_targ_PCs$PC9[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC9 < (max(ref_PCs_targ_PCs$PC9[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5) &
+							ref_PCs_targ_PCs$PC10 > (min(ref_PCs_targ_PCs$PC10[ref_PCs_targ_PCs[[i]] == 'Target'])-0.5) & 
+							ref_PCs_targ_PCs$PC10 < (max(ref_PCs_targ_PCs$PC10[ref_PCs_targ_PCs[[i]] == 'Target'])+0.5),], aes(x=PC9,y=PC10, colour=get(i))) + 
+		  geom_point() + 
+		  geom_point(data=ref_PCs_targ_PCs[ref_PCs_targ_PCs[[i]] == 'Target',], aes(x=PC9,y=PC10), size=3, colour='black') + 
+		  ggtitle("PCs 9 and 10") +
+		  labs(colour="")
+
+		png(paste0(opt$output,'.PCs_plot_',i,'_zoom.png'), units='px', res=300, width=4000, height=2500)
+		print(plot_grid(PC_1_2_zoom,PC_3_4_zoom,PC_5_6_zoom,PC_7_8_zoom,PC_9_10_zoom))
+		dev.off()
+
+
 		print(i)
 	}
 
@@ -411,17 +467,34 @@ if(!is.na(opt$pop_data)){
 	sink()
 
 	sink(file = paste(opt$output,'.log',sep=''), append = T)
-	cat('Building C5.0 tree to predicting most likely population for target samples.\n')
+	cat('Building elastic net model to predict ancestry.\n')
 	sink()
 
 	for(i in Label_groups){
-		model <- train(y=as.factor(ref_PCs[[i]]), x=ref_PCs[grepl('PC',names(ref_PCs))], method="C5.0Tree", metric='logLoss', trControl=trainControl(method="cv", number=10, classProbs= TRUE, savePredictions = 'final', summaryFunction = multiClassSummary))
-		pred<-predict(object = model$finalModel, newdata = data.matrix(targ_PCs[grepl('PC',names(targ_PCs))]), type = "prob")
+		enet_model <- train(y=as.factor(ref_PCs[[i]]), x=ref_PCs[grepl('PC',names(ref_PCs))], method="glmnet", metric='logLoss', trControl=trainControl(method="cv", number=5, classProbs= TRUE, savePredictions = 'final', summaryFunction = multiClassSummary),tuneGrid = expand.grid(alpha = 0,lambda = 0))
+		
+		# Calculate the percentage of correctly individuals to each group		
+		enet_model_n_correct<-NULL
+		for(k in as.character(unique(enet_model$pred$obs))){
+			tmp<-enet_model$pred[enet_model$pred$obs == k,]
+		
+		n_correct_tmp<-data.frame(	Group=k,
+									N_obs=sum(tmp$obs == k),
+									prop_correct=round(sum(tmp$obs == k & tmp$pred == k)/sum(tmp$obs == k),3))
+		
+		enet_model_n_correct<-rbind(enet_model_n_correct,n_correct_tmp)
+		}
+		
+		write.table(enet_model_n_correct, paste0(opt$output,'.',i,'_enet_prediction_details.txt'), col.names=T, row.names=F, quote=F)
 
-		write.table(data.frame(IID=targ_PCs$IID,round(pred,3)),paste0(opt$output,'.',i,'_prediction.txt'), col.names=T, row.names=F, quote=F)
+		enet_pred<-predict(object = enet_model$finalModel, newx = data.matrix(targ_PCs[grepl('PC',names(targ_PCs))]), type = "response", s=enet_model$finalModel$lambdaOpt)
+
+		enet_output<-data.frame(IID=targ_PCs$IID,round(enet_pred,3))
+		names(enet_output)<-gsub('.1','',names(enet_output))
+		write.table(enet_output, paste0(opt$output,'.',i,'_enet_prediction.txt'), col.names=T, row.names=F, quote=F)
 		
 		sink(file = paste(opt$output,'.log',sep=''), append = T)
-		cat('Model predicting',i,'has an AUC of ',model$results$AUC,'.\n')
+		cat('Model predicting',i,'has an AUC of ',enet_model$results$AUC,'.\n')
 		sink()
 
 		print(i)
@@ -433,5 +506,5 @@ time.taken <- end.time - start.time
 sink(file = paste(opt$output,'.log',sep=''), append = T)
 cat('Analysis finished at',as.character(end.time),'\n')
 cat('Analysis duration was',as.character(round(time.taken,2)),attr(time.taken, 'units'),'\n')
-cat('Project PCs are here: ',opt$output,'.eigenvec.\n',sep='')
+cat('Projected PCs are here: ',opt$output,'.eigenvec.\n',sep='')
 sink()
